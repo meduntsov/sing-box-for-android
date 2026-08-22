@@ -1,0 +1,80 @@
+name: Build AliceVPN SFA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - alice-health
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout patched SFA
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools"
+          sdkmanager "platforms;android-37"
+
+      - name: Setup Android NDK r28
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.6'
+          cache: false
+
+      - name: Clone sing-box
+        run: |
+          git clone --depth 1             --branch testing             https://github.com/SagerNet/sing-box.git             "$RUNNER_TEMP/sing-box"
+
+      - name: Build arm64 libbox
+        working-directory: ${{ runner.temp }}/sing-box
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          make lib_install
+          export PATH="$PATH:$(go env GOPATH)/bin"
+
+          go run ./cmd/internal/build_libbox             -target android             -platform android/arm64
+
+          mkdir -p "$GITHUB_WORKSPACE/app/libs"
+
+          cp libbox.aar             "$GITHUB_WORKSPACE/app/libs/libbox.aar"
+
+          cp libbox-legacy.aar             "$GITHUB_WORKSPACE/app/libs/libbox-legacy.aar"
+
+      - name: Build SFA
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleOtherDebug             --no-daemon             --stacktrace
+
+      - name: Show APKs
+        if: always()
+        run: |
+          find app/build/outputs/apk             -type f             -name '*.apk'             -print || true
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AliceVPN-SFA
+          path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
