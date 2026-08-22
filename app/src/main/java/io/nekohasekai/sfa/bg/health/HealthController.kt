@@ -6,10 +6,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
@@ -25,6 +28,7 @@ import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.SecureRandom
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.ceil
 
 class HealthController(
@@ -56,8 +60,10 @@ class HealthController(
         private const val MIN_SPEED_MBPS = 8.0
         private const val MIN_SWITCH_IMPROVEMENT = 0.12
 
-        private const val SOCKET_TIMEOUT_MS = 8000
-        private const val HTTP_TIMEOUT_MS = 10000
+        // v2: one dead endpoint must not stall the whole selector for minutes.
+        private const val SOCKET_TIMEOUT_MS = 3000
+        private const val HTTP_TIMEOUT_MS = 5000
+        private const val NODE_SOFT_BUDGET_MS = 45_000L
         private const val MAX_MTPROTO_PAYLOAD = 1024 * 1024
 
         private const val REQ_PQ_MULTI = 0xBE7E8EF1.toInt()
@@ -106,67 +112,71 @@ class HealthController(
     private val cacheDir = File(appContext.filesDir, "alice-health").apply { mkdirs() }
     private val telegramCache = File(cacheDir, "telegram-bootstrap.json")
     private var loopJob: Job? = null
-    private val speedCache = HashMap<String, Double?>()
+    private val speedCache = ConcurrentHashMap<String, Double>()
     private var lastSpeedTestAt = 0L
+    private var cycleNumber = 0L
 
     fun start() {
         if (loopJob != null) return
+        Log.i(
+            TAG,
+            "v2 START selector=${plan.selectorTag}, nodes=${plan.nodes.joinToString(",") { it.tag }}",
+        )
         loopJob = scope.launch {
-            delay(2000)
+            delay(1500)
             while (isActive) {
-                runCatching { runCycle() }
-                    .onFailure { Log.w(TAG, "health cycle failed", it) }
+                try {
+                    runCycle()
+                } catch (e: Exception) {
+                    Log.w(TAG, "health cycle failed: ${e.message}", e)
+                }
                 delay(HEALTH_INTERVAL_MS)
             }
         }
     }
 
     override fun close() {
+        Log.i(TAG, "v2 STOP")
         loopJob?.cancel()
         loopJob = null
         scope.cancel()
     }
 
-    private fun runCycle() {
-        if (plan.nodes.isEmpty()) return
+    private suspend fun runCycle() {
+        if (plan.nodes.isEmpty()) {
+            Log.w(TAG, "cycle skipped: no concrete VLESS nodes")
+            return
+        }
+
+        val cycle = ++cycleNumber
+        val cycleStarted = System.nanoTime()
+        Log.i(TAG, "CYCLE#$cycle START nodes=${plan.nodes.size}")
 
         val dcs = loadTelegramDcs() ?: run {
-            Log.w(TAG, "Telegram bootstrap unavailable; selector unchanged")
+            Log.w(TAG, "CYCLE#$cycle Telegram bootstrap unavailable; selector unchanged")
             return
         }
 
         val now = System.currentTimeMillis()
-        val globalSpeedTest = now - lastSpeedTestAt >= SPEED_INTERVAL_MS || speedCache.values.all { it == null }
+        val globalSpeedTest =
+            now - lastSpeedTestAt >= SPEED_INTERVAL_MS || speedCache.isEmpty()
         if (globalSpeedTest) lastSpeedTestAt = now
 
-        val results = plan.nodes.map { node ->
-            val tg = probeTelegram(node, dcs)
-            val ig = probeInstagram(node)
-            val servicesOk = tg.ok && ig.apiOk && ig.cdnOk
-
-            if (!servicesOk) {
-                speedCache[node.tag] = null
-            } else if (globalSpeedTest || speedCache[node.tag] == null) {
-                speedCache[node.tag] = probeSpeed(node)
-            }
-
-            NodeResult(node.tag, tg, ig, speedCache[node.tag])
-        }
-
-        for (row in results) {
-            Log.i(
-                TAG,
-                "${row.tag}: TG=${row.telegram.okDc}/${row.telegram.totalDc} " +
-                    "abr=${row.telegram.abridgedOk} int=${row.telegram.intermediateOk} " +
-                    "${formatMs(row.telegram.medianMs)}, IG=${formatMs(row.instagram.apiMs)}/" +
-                    "${formatMs(row.instagram.cdnMs)}, speed=${formatSpeed(row.speedMbps)}, " +
-                    "eligible=${eligible(row)}",
-            )
+        val results = supervisorScope {
+            plan.nodes.map { node ->
+                async(Dispatchers.IO) {
+                    probeNode(node, dcs, globalSpeedTest, cycle)
+                }
+            }.awaitAll()
         }
 
         val candidates = results.filter(::eligible)
         if (candidates.isEmpty()) {
-            Log.w(TAG, "no eligible server; selector unchanged")
+            Log.w(
+                TAG,
+                "CYCLE#$cycle DONE: no eligible server; selector unchanged; " +
+                    "elapsed=${elapsedMs(cycleStarted)}ms",
+            )
             return
         }
 
@@ -185,11 +195,112 @@ class HealthController(
 
         if (best.tag != currentTag) {
             clashSelect(best.tag)
-            Log.i(TAG, "SELECT -> ${best.tag}, score=${"%.1f".format(score(best))}")
+            Log.i(
+                TAG,
+                "CYCLE#$cycle SELECT -> ${best.tag}, score=${"%.1f".format(score(best))}, " +
+                    "elapsed=${elapsedMs(cycleStarted)}ms",
+            )
         } else {
-            Log.i(TAG, "KEEP -> ${best.tag}, score=${"%.1f".format(score(best))}")
+            Log.i(
+                TAG,
+                "CYCLE#$cycle KEEP -> ${best.tag}, score=${"%.1f".format(score(best))}, " +
+                    "elapsed=${elapsedMs(cycleStarted)}ms",
+            )
         }
     }
+
+    private fun probeNode(
+        node: HealthConfigPatcher.Node,
+        dcs: Map<Int, List<DcEndpoint>>,
+        globalSpeedTest: Boolean,
+        cycle: Long,
+    ): NodeResult {
+        val started = System.nanoTime()
+        val deadlineNs = started + NODE_SOFT_BUDGET_MS * 1_000_000L
+        Log.i(TAG, "CYCLE#$cycle ${node.tag}: START port=${node.testPort}")
+
+        val tg = try {
+            probeTelegram(node, dcs, deadlineNs, cycle)
+        } catch (e: Exception) {
+            Log.w(TAG, "CYCLE#$cycle ${node.tag}: TG exception: ${e.message}")
+            failedTelegram(dcs.size)
+        }
+
+        Log.i(
+            TAG,
+            "CYCLE#$cycle ${node.tag}: TG=${tg.okDc}/${tg.totalDc} " +
+                "abr=${tg.abridgedOk} int=${tg.intermediateOk} ${formatMs(tg.medianMs)}",
+        )
+
+        if (deadlineExceeded(deadlineNs)) {
+            speedCache.remove(node.tag)
+            val row = NodeResult(node.tag, tg, failedInstagram(), null)
+            Log.w(
+                TAG,
+                "CYCLE#$cycle ${node.tag}: SOFT-TIMEOUT after TG, " +
+                    "elapsed=${elapsedMs(started)}ms",
+            )
+            return row
+        }
+
+        val ig = try {
+            probeInstagram(node, deadlineNs)
+        } catch (e: Exception) {
+            Log.w(TAG, "CYCLE#$cycle ${node.tag}: IG exception: ${e.message}")
+            failedInstagram()
+        }
+
+        Log.i(
+            TAG,
+            "CYCLE#$cycle ${node.tag}: IG api=${formatMs(ig.apiMs)} " +
+                "cdn=${formatMs(ig.cdnMs)} apiOk=${ig.apiOk} cdnOk=${ig.cdnOk}",
+        )
+
+        val servicesOk = tg.ok && ig.apiOk && ig.cdnOk
+        var speed = speedCache[node.tag]
+
+        if (!servicesOk) {
+            speedCache.remove(node.tag)
+            speed = null
+        } else if (!deadlineExceeded(deadlineNs) && (globalSpeedTest || speed == null)) {
+            speed = probeSpeed(node)
+            if (speed == null) {
+                speedCache.remove(node.tag)
+            } else {
+                speedCache[node.tag] = speed
+            }
+        }
+
+        val row = NodeResult(node.tag, tg, ig, speed)
+        Log.i(
+            TAG,
+            "CYCLE#$cycle ${node.tag}: DONE speed=${formatSpeed(speed)} " +
+                "eligible=${eligible(row)} elapsed=${elapsedMs(started)}ms",
+        )
+        return row
+    }
+
+    private fun failedTelegram(totalDc: Int) = TelegramResult(
+        ok = false,
+        medianMs = null,
+        okDc = 0,
+        totalDc = totalDc,
+        requiredDc = requiredDcCount(totalDc),
+        abridgedOk = 0,
+        intermediateOk = 0,
+    )
+
+    private fun failedInstagram() = InstagramResult(
+        apiOk = false,
+        apiMs = null,
+        cdnOk = false,
+        cdnMs = null,
+    )
+
+    private fun deadlineExceeded(deadlineNs: Long): Boolean = System.nanoTime() >= deadlineNs
+
+    private fun elapsedMs(startedNs: Long): Long =
+        (System.nanoTime() - startedNs) / 1_000_000L
 
     private fun eligible(row: NodeResult): Boolean {
         val tg = row.telegram
@@ -220,7 +331,10 @@ class HealthController(
         }
 
         for (node in plan.nodes) {
-            val source = runCatching { httpText(node, TG_BOOTSTRAP_URL, 2_000_000) }.getOrNull() ?: continue
+            Log.i(TAG, "Telegram bootstrap: trying ${node.tag}")
+            val source = runCatching { httpText(node, TG_BOOTSTRAP_URL, 2_000_000) }
+                .onFailure { Log.w(TAG, "Telegram bootstrap ${node.tag} failed: ${it.message}") }
+                .getOrNull() ?: continue
             val parsed = runCatching { parseTelegramDesktopBootstrap(source) }.getOrNull() ?: continue
             if (parsed.isNotEmpty()) {
                 writeTelegramCache(parsed)
@@ -293,20 +407,34 @@ class HealthController(
     private fun probeTelegram(
         node: HealthConfigPatcher.Node,
         dcs: Map<Int, List<DcEndpoint>>,
+        deadlineNs: Long,
+        cycle: Long,
     ): TelegramResult {
         val successfulDcLatency = mutableListOf<Double>()
         var abridgedOk = 0
         var intermediateOk = 0
 
         for ((dc, endpoints) in dcs.toSortedMap()) {
+            if (deadlineExceeded(deadlineNs)) {
+                Log.w(TAG, "CYCLE#$cycle ${node.tag}: TG budget exhausted before DC$dc")
+                break
+            }
+
             val preferred = if (dc % 2 == 1) ABRIDGED else INTERMEDIATE
             val alternate = if (preferred == ABRIDGED) INTERMEDIATE else ABRIDGED
             var best: Pair<String, Double>? = null
 
             endpointLoop@ for (endpoint in endpoints) {
                 for (transport in listOf(preferred, alternate)) {
+                    if (deadlineExceeded(deadlineNs)) break@endpointLoop
+
                     val latency = runCatching {
                         mtprotoReqPq(node.testPort, endpoint.ip, endpoint.port, transport)
+                    }.onFailure {
+                        Log.d(
+                            TAG,
+                            "CYCLE#$cycle ${node.tag}: DC$dc $transport ${endpoint.ip} failed: ${it.message}",
+                        )
                     }.getOrNull()
 
                     if (latency != null) {
@@ -319,6 +447,12 @@ class HealthController(
             if (best != null) {
                 successfulDcLatency += best.second
                 if (best.first == ABRIDGED) abridgedOk++ else intermediateOk++
+                Log.i(
+                    TAG,
+                    "CYCLE#$cycle ${node.tag}: DC$dc OK ${best.first} ${formatMs(best.second)}",
+                )
+            } else {
+                Log.w(TAG, "CYCLE#$cycle ${node.tag}: DC$dc FAIL")
             }
         }
 
@@ -486,10 +620,22 @@ class HealthController(
         return socket
     }
 
-    private fun probeInstagram(node: HealthConfigPatcher.Node): InstagramResult {
+    private fun probeInstagram(
+        node: HealthConfigPatcher.Node,
+        deadlineNs: Long,
+    ): InstagramResult {
+        if (deadlineExceeded(deadlineNs)) return failedInstagram()
+
         val api = httpReachability(node, INSTAGRAM_API)
-        val cdn = INSTAGRAM_CDNS.map { httpReachability(node, it) }
-            .filter { it.first && it.second != null }
+        val cdn = mutableListOf<Pair<Boolean, Double?>>()
+
+        for (url in INSTAGRAM_CDNS) {
+            if (deadlineExceeded(deadlineNs)) break
+            val result = httpReachability(node, url)
+            if (result.first && result.second != null) {
+                cdn += result
+            }
+        }
 
         return InstagramResult(
             apiOk = api.first,
