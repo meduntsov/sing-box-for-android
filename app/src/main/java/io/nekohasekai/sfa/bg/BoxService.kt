@@ -28,6 +28,8 @@ import io.nekohasekai.libbox.PlatformInterface
 import io.nekohasekai.libbox.SystemProxyStatus
 import io.nekohasekai.sfa.Application
 import io.nekohasekai.sfa.R
+import io.nekohasekai.sfa.bg.health.HealthConfigPatcher
+import io.nekohasekai.sfa.bg.health.HealthController
 import io.nekohasekai.sfa.compose.MainActivity
 import io.nekohasekai.sfa.constant.Action
 import io.nekohasekai.sfa.constant.Alert
@@ -74,6 +76,25 @@ class BoxService(private val service: Service, private val platformInterface: Pl
     private val binder = ServiceBinder(status)
     private val notification = ServiceNotification(status, service)
     private lateinit var commandServer: CommandServer
+    private var healthController: HealthController? = null
+
+    private fun patchHealthConfig(content: String): HealthConfigPatcher.Result? {
+        if (service !is VPNService) return null
+        return runCatching { HealthConfigPatcher.patch(content) }
+            .onFailure { Log.w(TAG, "Alice health config patch disabled for this profile", it) }
+            .getOrNull()
+    }
+
+    private fun startHealthController(plan: HealthConfigPatcher.Plan?) {
+        stopHealthController()
+        if (service !is VPNService || plan == null) return
+        healthController = HealthController(service.applicationContext, plan).also { it.start() }
+    }
+
+    private fun stopHealthController() {
+        healthController?.close()
+        healthController = null
+    }
 
     private var receiverRegistered = false
     private val receiver =
@@ -125,6 +146,9 @@ class BoxService(private val service: Service, private val platformInterface: Pl
                 return
             }
 
+            val healthPatch = patchHealthConfig(content)
+            val effectiveContent = healthPatch?.content ?: content
+
             lastProfileName = profile.name
             withContext(Dispatchers.Main) {
                 notification.show(lastProfileName, R.string.status_starting)
@@ -134,7 +158,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
 
             try {
                 commandServer.startOrReloadService(
-                    content,
+                    effectiveContent,
                     OverrideOptions().apply {
                         autoRedirect = Settings.autoRedirect
                         if (Vendor.isPerAppProxyAvailable() && Settings.perAppProxyEnabled) {
@@ -172,6 +196,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
                 notification.show(lastProfileName, R.string.status_started)
             }
             notification.start()
+            startHealthController(healthPatch?.plan)
         } catch (e: Exception) {
             stopAndAlert(Alert.StartService, e.message)
             return
@@ -179,6 +204,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
     }
 
     override fun serviceStop() {
+        stopHealthController()
         notification.close()
         status.postValue(Status.Starting)
         val pfd = fileDescriptor
@@ -213,10 +239,13 @@ class BoxService(private val service: Service, private val platformInterface: Pl
             stopAndAlert(Alert.EmptyConfiguration)
             return
         }
+        stopHealthController()
+        val healthPatch = patchHealthConfig(content)
+        val effectiveContent = healthPatch?.content ?: content
         lastProfileName = profile.name
         try {
             commandServer.startOrReloadService(
-                content,
+                effectiveContent,
                 OverrideOptions().apply {
                     autoRedirect = Settings.autoRedirect
                     if (Vendor.isPerAppProxyAvailable() && Settings.perAppProxyEnabled) {
@@ -246,6 +275,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
                 return
             }
         }
+        startHealthController(healthPatch?.plan)
     }
 
     override fun getSystemProxyStatus(): SystemProxyStatus? {
@@ -274,6 +304,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
     private fun stopService() {
         if (status.value != Status.Started) return
         status.value = Status.Stopping
+        stopHealthController()
         if (receiverRegistered) {
             service.unregisterReceiver(receiver)
             receiverRegistered = false
@@ -308,6 +339,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
     }
 
     private suspend fun stopAndAlert(type: Alert, message: String? = null) {
+        stopHealthController()
         Settings.startedByUser = false
         val pfd = fileDescriptor
         if (pfd != null) {
@@ -370,6 +402,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
     internal fun onBind(): IBinder = binder
 
     internal fun onDestroy() {
+        stopHealthController()
         binder.close()
     }
 
