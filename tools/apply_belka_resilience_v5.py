@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import runpy
 
 path = Path("app/src/main/java/io/nekohasekai/sfa/bg/health/HealthController.kt")
 text = path.read_text(encoding="utf-8")
@@ -153,3 +154,8 @@ print("- fast gate tries Google then Cloudflare")
 print("- one blocked probe no longer eliminates a server")
 print("- normal candidate = web 2/3 + Telegram or Instagram")
 print("- degraded fallback accepts any proven working service")
+
+# v6 patches HealthController plus UI/state after all v1-v5 transformations are
+# already present. Keep this chained here so existing CI workflows that invoke
+# resilience v5 automatically receive the underlay diagnosis feature.
+runpy.run_path("tools/apply_belka_underlay_speed_v6.py", run_name="__main__")
