@@ -119,6 +119,16 @@ patch_file(
             "clear lock on VPN stop",
         ),
         (
+'''                Log.i(TAG, "MANUAL LOCK released: selector changed $lockedTag -> $currentTag")
+                manualLockedTag = null
+''',
+'''                Log.i(TAG, "MANUAL LOCK released: selector changed $lockedTag -> $currentTag")
+                manualLockedTag = null
+                BelkaVpnState.clearManualLock()
+''',
+            "clear UI lock after external selector change",
+        ),
+        (
 '''    internal suspend fun manualCheckCurrent(service: BelkaManualService): BelkaManualResult {
 ''',
 '''    internal fun manualAvailableTags(): List<String> = plan.nodes.map { it.tag }
@@ -178,6 +188,16 @@ patch_file(
 patch_file(
     "app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/DashboardScreen.kt",
     [
+        (
+'''import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+''',
+'''import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.weight
+import androidx.compose.foundation.lazy.LazyColumn
+''',
+            "weight import",
+        ),
         (
 '''import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
