@@ -102,6 +102,18 @@ jobs:
           set -euo pipefail
           python3 tools/apply_belka_fast_gate_v2.py
 
+      - name: Apply BelkaVPN HTTP probe v3
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/apply_belka_http_probe_v3.py
+
+      - name: Apply BelkaVPN network guard v4
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/apply_belka_network_guard_v4.py
+
       - name: Set BelkaVPN version
         shell: bash
         run: |
@@ -116,7 +128,7 @@ jobs:
           text = path.read_text(encoding="utf-8")
           run_number = int(os.environ["GITHUB_RUN_NUMBER"])
           version_code = 100000 + run_number
-          version_name = f"2.4.{run_number}"
+          version_name = f"2.5.{run_number}"
 
           text, count_code = re.subn(
               r"(?m)^VERSION_CODE\s*=\s*\d+\s*$",
@@ -212,7 +224,7 @@ jobs:
               "$RELEASE_SHA" \
               "$RELEASE_META" \
               --title "$TITLE" \
-              --notes "BelkaVPN $VERSION_NAME — cancellable 2.5s Clash-API fast gate, sticky 10-minute health selection, signed arm64 build."
+              --notes "BelkaVPN $VERSION_NAME — native cancellable HTTP health probes, Android network-transition guard, sticky 10-minute selection, signed arm64 build."
           fi
 
       - name: Show APKs
