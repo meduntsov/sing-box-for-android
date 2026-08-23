@@ -142,7 +142,7 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      - name: Prepare release APK and SHA-256
+      - name: Prepare release APK, checksum and metadata
         shell: bash
         run: |
           set -euo pipefail
@@ -159,6 +159,7 @@ jobs:
 
           RELEASE_APK="$RUNNER_TEMP/BelkaVPN-arm64-v8a.apk"
           RELEASE_SHA="$RUNNER_TEMP/BelkaVPN-arm64-v8a.apk.sha256"
+          RELEASE_META="$RUNNER_TEMP/SFA-version-metadata.json"
 
           cp "$APK" "$RELEASE_APK"
           sha256sum "$RELEASE_APK" | awk '{print $1}' > "$RELEASE_SHA"
@@ -166,13 +167,22 @@ jobs:
           VERSION_CODE="$(grep '^VERSION_CODE=' version.properties | cut -d= -f2)"
           VERSION_NAME="$(grep '^VERSION_NAME=' version.properties | cut -d= -f2)"
 
+          cat > "$RELEASE_META" <<EOF
+          {
+            "version_code": $VERSION_CODE,
+            "version_name": "$VERSION_NAME"
+          }
+          EOF
+
           echo "RELEASE_APK=$RELEASE_APK" >> "$GITHUB_ENV"
           echo "RELEASE_SHA=$RELEASE_SHA" >> "$GITHUB_ENV"
+          echo "RELEASE_META=$RELEASE_META" >> "$GITHUB_ENV"
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
 
           echo "APK: $RELEASE_APK"
           echo "SHA256: $(cat "$RELEASE_SHA")"
+          cat "$RELEASE_META"
 
       - name: Publish GitHub Release
         shell: bash
@@ -188,11 +198,13 @@ jobs:
             gh release upload "$TAG" \
               "$RELEASE_APK" \
               "$RELEASE_SHA" \
+              "$RELEASE_META" \
               --clobber
           else
             gh release create "$TAG" \
               "$RELEASE_APK" \
               "$RELEASE_SHA" \
+              "$RELEASE_META" \
               --title "$TITLE" \
               --notes "BelkaVPN $VERSION_NAME — automated signed arm64 build."
           fi
