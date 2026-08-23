@@ -168,7 +168,7 @@ patch_exact(
 # signature + encoder line instead of an entire implementation body.
 patch_regex(
     health,
-    r'''    private fun clashSelect\(tag: String\) \{\n\s*val encoded = URLEncoder\.encode\(plan\.selectorTag, "UTF-8"\)\.replace\("\\\+", "%20"\)\n''',
+    r'''    private fun clashSelect\(tag: String\) \{\n\s*val encoded = URLEncoder\.encode\(plan\.selectorTag, "UTF-8"\)\.replace\("\+", "%20"\)\n''',
     '''    private fun clashSelect(tag: String) {
         clashSelectNamed(plan.selectorTag, tag)
     }
