@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: belkavpn-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -153,6 +157,12 @@ jobs:
           python3 tools/apply_belka_manual_checks_v7.py
           python3 tools/apply_belka_manual_checks_v7_fix.py
 
+      - name: Apply BelkaVPN manual server selector v8
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/apply_belka_manual_server_selector_v8.py
+
       - name: Set BelkaVPN version
         shell: bash
         run: |
@@ -167,7 +177,7 @@ jobs:
           text = path.read_text(encoding="utf-8")
           run_number = int(os.environ["GITHUB_RUN_NUMBER"])
           version_code = 100000 + run_number
-          version_name = f"2.7.{run_number}"
+          version_name = f"2.8.{run_number}"
 
           text, count_code = re.subn(
               r"(?m)^VERSION_CODE\s*=\s*\d+\s*$",
@@ -311,7 +321,7 @@ jobs:
               "$RELEASE_SHA" \
               "$RELEASE_META" \
               --title "$TITLE" \
-              --notes "BelkaVPN $VERSION_NAME — underlay diagnosis, resilient health selection, and manual Telegram/Instagram checks with locked one-time switching."
+              --notes "BelkaVPN $VERSION_NAME — manual server picker with country flags and session lock, manual Telegram/Instagram checks, underlay diagnosis, resilient health selection."
           fi
 
       - name: Show APKs
