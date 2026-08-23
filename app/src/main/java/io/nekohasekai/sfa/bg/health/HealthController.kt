@@ -742,9 +742,10 @@ class HealthController(
             if (deadlineExceeded(deadlineNs)) break
             val (name, url) = probe
             val result = httpReachability(node, url)
-            if (result.first && result.second != null) {
-                latencies += result.second
-                details += "$name=${formatMs(result.second)}"
+            val latency = result.second
+            if (result.first && latency != null) {
+                latencies += latency
+                details += "$name=${formatMs(latency)}"
             } else {
                 details += "$name=FAIL"
             }
