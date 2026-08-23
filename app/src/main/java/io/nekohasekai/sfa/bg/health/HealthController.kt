@@ -2,6 +2,7 @@ package io.nekohasekai.sfa.bg.health
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -56,7 +57,8 @@ class HealthController(
 
         private const val MAX_TG_MTPROTO_MS = 900.0
         private const val MAX_IG_API_MS = 1500.0
-        private const val MAX_IG_CDN_MS = 1500.0
+        // v2.1: Instagram CDN is a soft signal, not a hard eligibility gate.
+        private const val IG_CDN_FAIL_SCORE_PENALTY_MS = 400.0
         private const val MIN_SPEED_MBPS = 8.0
         private const val MIN_SWITCH_IMPROVEMENT = 0.12
 
@@ -120,13 +122,15 @@ class HealthController(
         if (loopJob != null) return
         Log.i(
             TAG,
-            "v2 START selector=${plan.selectorTag}, nodes=${plan.nodes.joinToString(",") { it.tag }}",
+            "v2.1 START selector=${plan.selectorTag}, nodes=${plan.nodes.joinToString(",") { it.tag }}",
         )
         loopJob = scope.launch {
             delay(1500)
             while (isActive) {
                 try {
                     runCycle()
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.w(TAG, "health cycle failed: ${e.message}", e)
                 }
@@ -136,7 +140,7 @@ class HealthController(
     }
 
     override fun close() {
-        Log.i(TAG, "v2 STOP")
+        Log.i(TAG, "v2.1 STOP")
         loopJob?.cancel()
         loopJob = null
         scope.cancel()
@@ -253,13 +257,18 @@ class HealthController(
         Log.i(
             TAG,
             "CYCLE#$cycle ${node.tag}: IG api=${formatMs(ig.apiMs)} " +
-                "cdn=${formatMs(ig.cdnMs)} apiOk=${ig.apiOk} cdnOk=${ig.cdnOk}",
+                "cdn=${if (ig.cdnOk) formatMs(ig.cdnMs) else "FAIL(soft)"} " +
+                "apiOk=${ig.apiOk} cdnOk=${ig.cdnOk}",
         )
 
-        val servicesOk = tg.ok && ig.apiOk && ig.cdnOk
+        val preSpeedEligible =
+            tg.ok &&
+                tg.medianMs != null && tg.medianMs <= MAX_TG_MTPROTO_MS &&
+                ig.apiOk && ig.apiMs != null && ig.apiMs <= MAX_IG_API_MS
+
         var speed = speedCache[node.tag]
 
-        if (!servicesOk) {
+        if (!preSpeedEligible) {
             speedCache.remove(node.tag)
             speed = null
         } else if (!deadlineExceeded(deadlineNs) && (globalSpeedTest || speed == null)) {
@@ -310,16 +319,17 @@ class HealthController(
             tg.medianMs != null && tg.medianMs <= MAX_TG_MTPROTO_MS &&
             tg.abridgedOk > 0 && tg.intermediateOk > 0 &&
             ig.apiOk && ig.apiMs != null && ig.apiMs <= MAX_IG_API_MS &&
-            ig.cdnOk && ig.cdnMs != null && ig.cdnMs <= MAX_IG_CDN_MS &&
             speed != null && speed >= MIN_SPEED_MBPS
     }
 
     private fun score(row: NodeResult): Double {
         val tg = row.telegram.medianMs ?: Double.MAX_VALUE
-        val ig = maxOf(
-            row.instagram.apiMs ?: Double.MAX_VALUE,
-            row.instagram.cdnMs ?: Double.MAX_VALUE,
-        )
+        val api = row.instagram.apiMs ?: 10_000.0
+        val ig = if (row.instagram.cdnOk && row.instagram.cdnMs != null) {
+            maxOf(api, row.instagram.cdnMs)
+        } else {
+            api + IG_CDN_FAIL_SCORE_PENALTY_MS
+        }
         val speed = (row.speedMbps ?: 0.1).coerceAtLeast(0.1)
         return 0.50 * tg + 0.35 * ig + 0.15 * (3000.0 / speed)
     }
