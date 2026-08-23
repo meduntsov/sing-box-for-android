@@ -62,6 +62,56 @@ jobs:
 
           cp libbox-legacy.aar             "$GITHUB_WORKSPACE/app/libs/libbox-legacy.aar"
 
+      - name: Restore persistent debug signing key
+        shell: bash
+        env:
+          ALICE_DEBUG_KEYSTORE: ${{ secrets.ALICE_DEBUG_KEYSTORE }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ALICE_DEBUG_KEYSTORE:-}" ]; then
+            echo "::error::GitHub Secret ALICE_DEBUG_KEYSTORE is missing or empty"
+            exit 1
+          fi
+
+          mkdir -p "$HOME/.android"
+          printf '%s' "$ALICE_DEBUG_KEYSTORE" | base64 --decode > "$HOME/.android/debug.keystore"
+          chmod 600 "$HOME/.android/debug.keystore"
+
+          echo "Persistent Android signing certificate:"
+          keytool -list -v \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storepass android \
+            -alias androiddebugkey \
+            | grep -E 'Alias name:|SHA256:' || true
+
+      - name: Set Alice versionCode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("version.properties")
+          text = path.read_text(encoding="utf-8")
+          version_code = 100000 + int(os.environ["GITHUB_RUN_NUMBER"])
+
+          new_text, count = re.subn(
+              r"(?m)^VERSION_CODE\s*=\s*\d+\s*$",
+              f"VERSION_CODE={version_code}",
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("VERSION_CODE not found exactly once in version.properties")
+
+          path.write_text(new_text, encoding="utf-8")
+          print(f"Alice build VERSION_CODE={version_code}")
+          PY
+
       - name: Build SFA
         run: |
           chmod +x gradlew
