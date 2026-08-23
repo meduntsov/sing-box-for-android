@@ -151,6 +151,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/apply_belka_manual_checks_v7.py
+          python3 tools/apply_belka_manual_checks_v7_fix.py
 
       - name: Set BelkaVPN version
         shell: bash
