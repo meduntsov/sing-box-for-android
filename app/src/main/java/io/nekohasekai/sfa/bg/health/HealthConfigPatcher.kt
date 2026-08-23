@@ -5,9 +5,24 @@ import org.json.JSONObject
 
 object HealthConfigPatcher {
     private const val SELECTOR_TAG = "proxy"
+    private const val AI_SELECTOR_TAG = "__belka_ai"
+    private const val AI_PREFERRED_COUNTRY_TAG = "de"
     private const val INBOUND_PREFIX = "__belka_health_"
     private const val FIRST_TEST_PORT = 20810
     private const val DEFAULT_CLASH_PORT = 9090
+
+    private val AI_DOMAIN_SUFFIXES = listOf(
+        "chatgpt.com",
+        "openai.com",
+        "oaistatic.com",
+        "oaiusercontent.com",
+        "claude.ai",
+        "anthropic.com",
+        "gemini.google.com",
+        "aistudio.google.com",
+        "generativelanguage.googleapis.com",
+        "robinfrontend-pa.googleapis.com",
+    )
 
     data class Node(
         val tag: String,
@@ -19,6 +34,8 @@ object HealthConfigPatcher {
         val clashPort: Int,
         val clashSecret: String,
         val nodes: List<Node>,
+        val aiSelectorTag: String? = null,
+        val aiPreferredTag: String? = null,
     )
 
     data class Result(
@@ -71,12 +88,40 @@ object HealthConfigPatcher {
         val concreteSelectorOutbounds = JSONArray()
         leafTags.forEach { tag ->
             concreteSelectorOutbounds.put(tag)
-            // Avoid 15-second stalls on dead routes.
+            // Avoid long stalls on dead routes.
             outboundByTag[tag]?.put("connect_timeout", "5s")
         }
         selector.put("outbounds", concreteSelectorOutbounds)
         selector.remove("default")
         selector.put("interrupt_exist_connections", true)
+
+        // Keep ChatGPT / Claude / Gemini on one country whenever possible.
+        // Germany is the preferred AI exit; if it becomes unusable, the AI
+        // selector falls back to the general BelkaVPN selector.
+        val aiPreferredTag = leafTags.firstOrNull {
+            it.equals(AI_PREFERRED_COUNTRY_TAG, ignoreCase = true)
+        }
+        val aiSelectorTag = if (aiPreferredTag != null) {
+            val aiSelector = outboundByTag[AI_SELECTOR_TAG] ?: JSONObject().also {
+                it.put("type", "selector")
+                it.put("tag", AI_SELECTOR_TAG)
+                outbounds.put(it)
+                outboundByTag[AI_SELECTOR_TAG] = it
+            }
+            aiSelector.put("type", "selector")
+            aiSelector.put("tag", AI_SELECTOR_TAG)
+            aiSelector.put(
+                "outbounds",
+                JSONArray()
+                    .put(aiPreferredTag)
+                    .put(SELECTOR_TAG),
+            )
+            aiSelector.put("default", aiPreferredTag)
+            aiSelector.put("interrupt_exist_connections", true)
+            AI_SELECTOR_TAG
+        } else {
+            null
+        }
 
         val cleanInbounds = JSONArray()
         val usedPorts = hashSetOf<Int>()
@@ -146,6 +191,16 @@ object HealthConfigPatcher {
             )
         }
 
+        if (aiSelectorTag != null) {
+            val domains = JSONArray()
+            AI_DOMAIN_SUFFIXES.forEach(domains::put)
+            cleanRules.put(
+                JSONObject()
+                    .put("domain_suffix", domains)
+                    .put("outbound", aiSelectorTag),
+            )
+        }
+
         for (index in 0 until existingRules.length()) {
             val rule = existingRules.optJSONObject(index) ?: continue
             val inbound = rule.opt("inbound")
@@ -160,7 +215,8 @@ object HealthConfigPatcher {
                 }
                 else -> false
             }
-            if (!isOldHealthRule) {
+            val isOldAiRule = rule.optString("outbound") == AI_SELECTOR_TAG
+            if (!isOldHealthRule && !isOldAiRule) {
                 // Old profiles may explicitly route traffic through urltest[auto].
                 // Route that traffic through BelkaVPN's selector instead.
                 if (rule.optString("outbound") == "auto") {
@@ -189,6 +245,8 @@ object HealthConfigPatcher {
                 clashPort = clashPort,
                 clashSecret = clash.optString("secret"),
                 nodes = nodes,
+                aiSelectorTag = aiSelectorTag,
+                aiPreferredTag = aiPreferredTag,
             ),
         )
     }
