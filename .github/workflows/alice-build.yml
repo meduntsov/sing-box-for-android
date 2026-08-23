@@ -207,16 +207,43 @@ jobs:
             exit 1
           fi
 
-          APK_CERT_SHA256="$("$APKSIGNER" verify --print-certs "$APK" \
-            | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
-            | head -1 \
-            | tr -d ':' \
-            | tr '[:upper:]' '[:lower:]')"
+          set +e
+          CERT_OUTPUT="$("$APKSIGNER" verify --verbose --print-certs "$APK" 2>&1)"
+          CERT_RC=$?
+          set -e
+
+          echo "----- apksigner certificate output -----"
+          printf '%s\n' "$CERT_OUTPUT"
+          echo "----------------------------------------"
+
+          if [ "$CERT_RC" -ne 0 ]; then
+            echo "::error::apksigner verification failed with exit code $CERT_RC"
+            exit 1
+          fi
+
+          APK_CERT_SHA256="$(printf '%s\n' "$CERT_OUTPUT" \
+            | grep -i -m1 'certificate SHA-256 digest:' \
+            | sed -E 's/.*certificate SHA-256 digest:[[:space:]]*//' \
+            | tr -d '[:space:]:' \
+            | tr '[:upper:]' '[:lower:]' || true)"
+
+          if [ -z "$APK_CERT_SHA256" ]; then
+            APK_CERT_SHA256="$(printf '%s\n' "$CERT_OUTPUT" \
+              | grep -i -m1 'SHA-256.*digest' \
+              | sed -E 's/.*:[[:space:]]*//' \
+              | tr -d '[:space:]:' \
+              | tr '[:upper:]' '[:lower:]' || true)"
+          fi
 
           echo "Keystore cert: $KEYSTORE_CERT_SHA256"
           echo "APK cert:      $APK_CERT_SHA256"
 
-          if [ -z "$APK_CERT_SHA256" ] || [ "$APK_CERT_SHA256" != "$KEYSTORE_CERT_SHA256" ]; then
+          if [ -z "$APK_CERT_SHA256" ]; then
+            echo "::error::Unable to parse APK signing certificate SHA-256 from apksigner output"
+            exit 1
+          fi
+
+          if [ "$APK_CERT_SHA256" != "$KEYSTORE_CERT_SHA256" ]; then
             echo "::error::APK signing certificate does not match pinned keystore"
             exit 1
           fi
