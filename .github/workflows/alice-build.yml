@@ -161,7 +161,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/apply_belka_manual_server_selector_v8.py
+          python3 tools/apply_belka_manual_server_selector_v8_fixed.py
 
       - name: Set BelkaVPN version
         shell: bash
@@ -321,7 +321,7 @@ jobs:
               "$RELEASE_SHA" \
               "$RELEASE_META" \
               --title "$TITLE" \
-              --notes "BelkaVPN $VERSION_NAME — manual server picker with country flags and session lock, manual Telegram/Instagram checks, underlay diagnosis, resilient health selection."
+              --notes "BelkaVPN $VERSION_NAME — manual server picker with session lock, Telegram/Instagram checks, underlay diagnosis, resilient health selection."
           fi
 
       - name: Show APKs
