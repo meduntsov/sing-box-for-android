@@ -44,7 +44,11 @@ class GitHubUpdateChecker : Closeable {
                     ?: metadataFromBelkaRelease(release)
                     ?: continue
 
-            if (!isNewerThanCurrent(metadata.versionName)) continue
+            // Android PackageManager requires an update to have a versionCode
+            // greater than the installed package. Do not offer an APK that has
+            // a newer-looking semantic version but would be rejected as a
+            // downgrade by Android.
+            if (!isNewerThanCurrent(metadata)) continue
 
             val currentBest = selected
             if (currentBest == null || isBetterVersion(metadata, currentBest.metadata)) {
@@ -97,8 +101,8 @@ class GitHubUpdateChecker : Closeable {
         }
     }
 
-    private fun isNewerThanCurrent(versionName: String): Boolean =
-        Libbox.compareSemver(versionName, BuildConfig.VERSION_NAME)
+    private fun isNewerThanCurrent(metadata: VersionMetadata): Boolean =
+        metadata.versionCode > BuildConfig.VERSION_CODE
 
     private fun isBetterVersion(version: VersionMetadata, other: VersionMetadata): Boolean {
         if (Libbox.compareSemver(version.versionName, other.versionName)) return true
