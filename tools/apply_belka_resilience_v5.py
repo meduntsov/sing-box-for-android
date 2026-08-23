@@ -72,7 +72,7 @@ replace_once(
             }.getOrNull()
 
             if (delay != null) {
-                best = if (best == null) delay else minOf(best, delay)
+                best = best?.let { previous -> minOf(previous, delay) } ?: delay
                 // One independent connectivity endpoint is enough for the gate.
                 break
             }
