@@ -189,16 +189,6 @@ patch_file(
     "app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/DashboardScreen.kt",
     [
         (
-'''import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-''',
-'''import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.weight
-import androidx.compose.foundation.lazy.LazyColumn
-''',
-            "weight import",
-        ),
-        (
 '''import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 ''',
