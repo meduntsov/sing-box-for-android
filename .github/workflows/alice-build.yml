@@ -140,6 +140,18 @@ jobs:
           set -euo pipefail
           python3 tools/apply_belka_resilience_v5.py
 
+      - name: Apply BelkaVPN underlay diagnosis v6
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/apply_belka_underlay_speed_v6.py
+
+      - name: Apply BelkaVPN manual service checks v7
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/apply_belka_manual_checks_v7.py
+
       - name: Set BelkaVPN version
         shell: bash
         run: |
@@ -298,7 +310,7 @@ jobs:
               "$RELEASE_SHA" \
               "$RELEASE_META" \
               --title "$TITLE" \
-              --notes "BelkaVPN $VERSION_NAME — pinned signing key with APK certificate verification, TLS SNI AI routing to DE, resilient health selection."
+              --notes "BelkaVPN $VERSION_NAME — underlay diagnosis, resilient health selection, and manual Telegram/Instagram checks with locked one-time switching."
           fi
 
       - name: Show APKs
