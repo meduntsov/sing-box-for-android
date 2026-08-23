@@ -18,6 +18,9 @@ object HealthConfigPatcher {
         "oaiusercontent.com",
         "claude.ai",
         "anthropic.com",
+        "claudeusercontent.com",
+        "clau.de",
+        "browser-intake-us5-datadoghq.com",
         "gemini.google.com",
         "aistudio.google.com",
         "generativelanguage.googleapis.com",
@@ -82,22 +85,15 @@ object HealthConfigPatcher {
         }
         if (leafTags.isEmpty()) return null
 
-        // BelkaVPN owns automatic server selection.
-        // Remove urltest/auto from the active proxy selector and use only
-        // concrete VLESS nodes discovered from the profile.
         val concreteSelectorOutbounds = JSONArray()
         leafTags.forEach { tag ->
             concreteSelectorOutbounds.put(tag)
-            // Avoid long stalls on dead routes.
             outboundByTag[tag]?.put("connect_timeout", "5s")
         }
         selector.put("outbounds", concreteSelectorOutbounds)
         selector.remove("default")
         selector.put("interrupt_exist_connections", true)
 
-        // Keep ChatGPT / Claude / Gemini on one country whenever possible.
-        // Germany is the preferred AI exit; if it becomes unusable, the AI
-        // selector falls back to the general BelkaVPN selector.
         val aiPreferredTag = leafTags.firstOrNull {
             it.equals(AI_PREFERRED_COUNTRY_TAG, ignoreCase = true)
         }
@@ -178,7 +174,8 @@ object HealthConfigPatcher {
             )
         }
 
-        // QUIC -> TCP fallback. A fast reject makes HTTP/3 clients retry TCP/443.
+        // Force HTTP/3 clients back to TCP, where TLS SNI can be sniffed
+        // reliably before routing AI traffic to its sticky country selector.
         for (tunTag in tunTags) {
             cleanRules.put(
                 JSONObject()
@@ -188,6 +185,21 @@ object HealthConfigPatcher {
                     .put("action", "reject")
                     .put("method", "default")
                     .put("no_drop", true),
+            )
+        }
+
+        // Android apps frequently connect to an already-resolved IP. Sniff TLS
+        // ClientHello/HTTP Host on TUN traffic so domain_suffix rules still see
+        // claude.ai, anthropic.com, openai.com, etc. The sniff action is not
+        // terminal: routing continues with the discovered hostname.
+        for (tunTag in tunTags) {
+            cleanRules.put(
+                JSONObject()
+                    .put("inbound", tunTag)
+                    .put("network", "tcp")
+                    .put("action", "sniff")
+                    .put("sniffer", JSONArray().put("tls").put("http"))
+                    .put("timeout", "500ms"),
             )
         }
 
@@ -216,9 +228,13 @@ object HealthConfigPatcher {
                 else -> false
             }
             val isOldAiRule = rule.optString("outbound") == AI_SELECTOR_TAG
-            if (!isOldHealthRule && !isOldAiRule) {
-                // Old profiles may explicitly route traffic through urltest[auto].
-                // Route that traffic through BelkaVPN's selector instead.
+            val isOldBelkaSniff = rule.optString("action") == "sniff" &&
+                when (inbound) {
+                    is String -> inbound in tunTags
+                    is JSONArray -> (0 until inbound.length()).any { inbound.optString(it) in tunTags }
+                    else -> false
+                }
+            if (!isOldHealthRule && !isOldAiRule && !isOldBelkaSniff) {
                 if (rule.optString("outbound") == "auto") {
                     rule.put("outbound", SELECTOR_TAG)
                 }
