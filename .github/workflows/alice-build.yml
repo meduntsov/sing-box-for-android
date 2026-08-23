@@ -1,10 +1,13 @@
-name: Build AliceVPN SFA
+name: Build BelkaVPN
 
 on:
   workflow_dispatch:
   push:
     branches:
       - alice-health
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -44,7 +47,10 @@ jobs:
 
       - name: Clone sing-box
         run: |
-          git clone --depth 1             --branch testing             https://github.com/SagerNet/sing-box.git             "$RUNNER_TEMP/sing-box"
+          git clone --depth 1 \
+            --branch testing \
+            https://github.com/SagerNet/sing-box.git \
+            "$RUNNER_TEMP/sing-box"
 
       - name: Build arm64 libbox
         working-directory: ${{ runner.temp }}/sing-box
@@ -54,13 +60,13 @@ jobs:
           make lib_install
           export PATH="$PATH:$(go env GOPATH)/bin"
 
-          go run ./cmd/internal/build_libbox             -target android             -platform android/arm64
+          go run ./cmd/internal/build_libbox \
+            -target android \
+            -platform android/arm64
 
           mkdir -p "$GITHUB_WORKSPACE/app/libs"
-
-          cp libbox.aar             "$GITHUB_WORKSPACE/app/libs/libbox.aar"
-
-          cp libbox-legacy.aar             "$GITHUB_WORKSPACE/app/libs/libbox-legacy.aar"
+          cp libbox.aar "$GITHUB_WORKSPACE/app/libs/libbox.aar"
+          cp libbox-legacy.aar "$GITHUB_WORKSPACE/app/libs/libbox-legacy.aar"
 
       - name: Restore persistent debug signing key
         shell: bash
@@ -78,14 +84,13 @@ jobs:
           printf '%s' "$ALICE_DEBUG_KEYSTORE" | base64 --decode > "$HOME/.android/debug.keystore"
           chmod 600 "$HOME/.android/debug.keystore"
 
-          echo "Persistent Android signing certificate:"
           keytool -list -v \
             -keystore "$HOME/.android/debug.keystore" \
             -storepass android \
             -alias androiddebugkey \
             | grep -E 'Alias name:|SHA256:' || true
 
-      - name: Set Alice versionCode
+      - name: Set BelkaVPN version
         shell: bash
         run: |
           set -euo pipefail
@@ -97,34 +102,106 @@ jobs:
 
           path = Path("version.properties")
           text = path.read_text(encoding="utf-8")
-          version_code = 100000 + int(os.environ["GITHUB_RUN_NUMBER"])
+          run_number = int(os.environ["GITHUB_RUN_NUMBER"])
+          version_code = 100000 + run_number
+          version_name = f"2.2.{run_number}"
 
-          new_text, count = re.subn(
+          text, count_code = re.subn(
               r"(?m)^VERSION_CODE\s*=\s*\d+\s*$",
               f"VERSION_CODE={version_code}",
               text,
               count=1,
           )
-          if count != 1:
-              raise SystemExit("VERSION_CODE not found exactly once in version.properties")
+          text, count_name = re.subn(
+              r"(?m)^VERSION_NAME\s*=\s*.*$",
+              f"VERSION_NAME={version_name}",
+              text,
+              count=1,
+          )
 
-          path.write_text(new_text, encoding="utf-8")
-          print(f"Alice build VERSION_CODE={version_code}")
+          if count_code != 1 or count_name != 1:
+              raise SystemExit(
+                  f"version.properties patch failed: code={count_code} name={count_name}"
+              )
+
+          path.write_text(text, encoding="utf-8")
+          print(f"BelkaVPN VERSION_CODE={version_code}")
+          print(f"BelkaVPN VERSION_NAME={version_name}")
           PY
 
-      - name: Build SFA
+      - name: Build BelkaVPN
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleOtherDebug             --no-daemon             --stacktrace
+          ./gradlew :app:assembleOtherDebug \
+            --no-daemon \
+            --stacktrace
+
+      - name: Prepare release APK and SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$(find app/build/outputs/apk \
+            -type f \
+            -name '*arm64-v8a-debug.apk' \
+            | head -1)"
+
+          if [ -z "$APK" ]; then
+            echo "::error::arm64-v8a APK not found"
+            exit 1
+          fi
+
+          RELEASE_APK="$RUNNER_TEMP/BelkaVPN-arm64-v8a.apk"
+          RELEASE_SHA="$RUNNER_TEMP/BelkaVPN-arm64-v8a.apk.sha256"
+
+          cp "$APK" "$RELEASE_APK"
+          sha256sum "$RELEASE_APK" | awk '{print $1}' > "$RELEASE_SHA"
+
+          VERSION_CODE="$(grep '^VERSION_CODE=' version.properties | cut -d= -f2)"
+          VERSION_NAME="$(grep '^VERSION_NAME=' version.properties | cut -d= -f2)"
+
+          echo "RELEASE_APK=$RELEASE_APK" >> "$GITHUB_ENV"
+          echo "RELEASE_SHA=$RELEASE_SHA" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+
+          echo "APK: $RELEASE_APK"
+          echo "SHA256: $(cat "$RELEASE_SHA")"
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          TAG="belkavpn-$VERSION_CODE"
+          TITLE="BelkaVPN $VERSION_NAME"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              "$RELEASE_APK" \
+              "$RELEASE_SHA" \
+              --clobber
+          else
+            gh release create "$TAG" \
+              "$RELEASE_APK" \
+              "$RELEASE_SHA" \
+              --title "$TITLE" \
+              --notes "BelkaVPN $VERSION_NAME — automated signed arm64 build."
+          fi
 
       - name: Show APKs
         if: always()
         run: |
-          find app/build/outputs/apk             -type f             -name '*.apk'             -print || true
+          find app/build/outputs/apk \
+            -type f \
+            -name '*.apk' \
+            -print || true
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AliceVPN-SFA
+          name: BelkaVPN-SFA
           path: app/build/outputs/apk/**/*.apk
           if-no-files-found: error

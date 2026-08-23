@@ -2,6 +2,7 @@ package io.nekohasekai.sfa.compose.screen.dashboard
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,6 +24,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -36,6 +38,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.nekohasekai.sfa.R
+import io.nekohasekai.sfa.bg.health.BelkaUpdateManager
+import io.nekohasekai.sfa.bg.health.BelkaVpnState
 import io.nekohasekai.sfa.compose.component.RemoteControlMenuItems
 import io.nekohasekai.sfa.compose.component.rememberRemoteServers
 import io.nekohasekai.sfa.compose.navigation.NewProfileArgs
@@ -56,6 +60,13 @@ fun DashboardScreen(
     viewModel: DashboardViewModel = viewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
+    val belkaVpnState by BelkaVpnState.state.collectAsState()
+    val belkaUpdateState by BelkaUpdateManager.state.collectAsState()
+
+    LaunchedEffect(Unit) {
+        BelkaUpdateManager.check(context)
+    }
     val remoteServer by RemoteControlManager.remoteServer.collectAsState()
     val remoteConnected by RemoteControlManager.isConnected.collectAsState()
     val isRemote = remoteServer != null
@@ -64,7 +75,23 @@ fun DashboardScreen(
 
     OverrideTopBar {
         TopAppBar(
-            title = { Text(stringResource(R.string.title_dashboard)) },
+            title = {
+                Column {
+                    Text(stringResource(R.string.title_dashboard))
+                    Text(
+                        text = when {
+                            serviceStatus != Status.Started -> "○ VPN отключён"
+                            belkaVpnState.selectedTag != null ->
+                                "🟢 ${BelkaVpnState.countryLabel(belkaVpnState.selectedTag)}"
+                            belkaVpnState.checking -> "🟡 Проверка VPN…"
+                            else -> "🟡 VPN запускается…"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                }
+            },
             actions = {
                 Box {
                     IconButton(onClick = { showOthersMenu = true }) {
@@ -103,8 +130,6 @@ fun DashboardScreen(
 
     val sheetState = rememberModalBottomSheetState()
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-
     // Show dashboard settings bottom sheet
     if (uiState.showCardSettingsDialog) {
         DashboardSettingsBottomSheet(
@@ -149,6 +174,19 @@ fun DashboardScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
             contentPadding = PaddingValues(bottom = bottomPadding),
         ) {
+            if (!isRemote) {
+                item {
+                    BelkaSmartStatusCard(
+                        vpnEnabled = serviceStatus == Status.Started,
+                        vpnState = belkaVpnState,
+                        updateState = belkaUpdateState,
+                        onUpdate = {
+                            BelkaUpdateManager.downloadAndInstall(context)
+                        },
+                    )
+                }
+            }
+
             // Dynamic dashboard cards
             // Show cards when service is running OR if it's the Profiles card (always available)
             val serviceRunning = uiState.isStatusVisible

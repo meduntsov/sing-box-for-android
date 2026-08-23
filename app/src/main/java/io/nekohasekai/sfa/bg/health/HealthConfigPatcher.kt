@@ -5,7 +5,7 @@ import org.json.JSONObject
 
 object HealthConfigPatcher {
     private const val SELECTOR_TAG = "proxy"
-    private const val INBOUND_PREFIX = "__alice_health_"
+    private const val INBOUND_PREFIX = "__belka_health_"
     private const val FIRST_TEST_PORT = 20810
     private const val DEFAULT_CLASH_PORT = 9090
 
@@ -34,9 +34,7 @@ object HealthConfigPatcher {
         for (index in 0 until outbounds.length()) {
             val outbound = outbounds.optJSONObject(index) ?: continue
             val tag = outbound.optString("tag")
-            if (tag.isNotBlank()) {
-                outboundByTag[tag] = outbound
-            }
+            if (tag.isNotBlank()) outboundByTag[tag] = outbound
         }
 
         val selector = outboundByTag[SELECTOR_TAG] ?: return null
@@ -71,12 +69,22 @@ object HealthConfigPatcher {
 
         val cleanInbounds = JSONArray()
         val usedPorts = hashSetOf<Int>()
+        val tunTags = linkedSetOf<String>()
         val existingInbounds = root.optJSONArray("inbounds") ?: JSONArray()
+
         for (index in 0 until existingInbounds.length()) {
             val inbound = existingInbounds.optJSONObject(index) ?: continue
-            if (inbound.optString("tag").startsWith(INBOUND_PREFIX)) continue
+            val inboundTag = inbound.optString("tag")
+            if (inboundTag.startsWith(INBOUND_PREFIX) ||
+                inboundTag.startsWith("__alice_health_")
+            ) {
+                continue
+            }
             val port = inbound.optInt("listen_port", -1)
             if (port > 0) usedPorts += port
+            if (inbound.optString("type") == "tun" && inboundTag.isNotBlank()) {
+                tunTags += inboundTag
+            }
             cleanInbounds.put(inbound)
         }
 
@@ -101,7 +109,8 @@ object HealthConfigPatcher {
         }
         root.put("inbounds", cleanInbounds)
 
-        val route = root.optJSONObject("route") ?: JSONObject().also { root.put("route", it) }
+        val route = root.optJSONObject("route")
+            ?: JSONObject().also { root.put("route", it) }
         val existingRules = route.optJSONArray("rules") ?: JSONArray()
         val cleanRules = JSONArray()
 
@@ -113,13 +122,30 @@ object HealthConfigPatcher {
             )
         }
 
+        // QUIC -> TCP fallback. A fast reject makes HTTP/3 clients retry TCP/443.
+        for (tunTag in tunTags) {
+            cleanRules.put(
+                JSONObject()
+                    .put("inbound", tunTag)
+                    .put("network", "udp")
+                    .put("port", 443)
+                    .put("action", "reject")
+                    .put("method", "default")
+                    .put("no_drop", true),
+            )
+        }
+
         for (index in 0 until existingRules.length()) {
             val rule = existingRules.optJSONObject(index) ?: continue
             val inbound = rule.opt("inbound")
             val isOldHealthRule = when (inbound) {
-                is String -> inbound.startsWith(INBOUND_PREFIX)
+                is String ->
+                    inbound.startsWith("__alice_health_") ||
+                        inbound.startsWith(INBOUND_PREFIX)
                 is JSONArray -> (0 until inbound.length()).any {
-                    inbound.optString(it).startsWith(INBOUND_PREFIX)
+                    val value = inbound.optString(it)
+                    value.startsWith("__alice_health_") ||
+                        value.startsWith(INBOUND_PREFIX)
                 }
                 else -> false
             }
