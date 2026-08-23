@@ -61,7 +61,7 @@ class HealthController(
         private const val MIN_SPEED_MBPS = 8.0
         private const val MIN_SWITCH_IMPROVEMENT = 0.12
 
-        private const val CIRCUIT_FAILS = 3
+        private const val CIRCUIT_FAILS = 2
         private const val CIRCUIT_QUARANTINE_MS = 15L * 60 * 1000
 
         private const val SOCKET_TIMEOUT_MS = 3000
@@ -195,9 +195,29 @@ class HealthController(
         val nextCheckAt = System.currentTimeMillis() + HEALTH_INTERVAL_MS
 
         if (candidates.isEmpty()) {
+            val degradedCandidates = results.filter(::fallbackEligible)
+            if (degradedCandidates.isNotEmpty()) {
+                val bestDegraded = degradedCandidates.minBy(::fallbackScore)
+                if (bestDegraded.tag != currentTag) {
+                    clashSelect(bestDegraded.tag)
+                }
+                Log.w(
+                    TAG,
+                    "CYCLE#$cycle DEGRADED -> ${bestDegraded.tag}, " +
+                        "score=${fmt1(fallbackScore(bestDegraded))}, " +
+                        "elapsed=${elapsedMs(cycleStarted)}ms",
+                )
+                BelkaVpnState.finishDegraded(
+                    bestDegraded.tag,
+                    "DEGRADED → ${bestDegraded.tag.uppercase(Locale.US)}",
+                    nextCheckAt,
+                )
+                return
+            }
+
             Log.w(
                 TAG,
-                "CYCLE#$cycle DONE: no eligible server; selector unchanged; elapsed=${elapsedMs(cycleStarted)}ms",
+                "CYCLE#$cycle DONE: no usable server; selector unchanged; elapsed=${elapsedMs(cycleStarted)}ms",
             )
             BelkaVpnState.finishNoEligible(currentTag, nextCheckAt)
             return
@@ -314,10 +334,14 @@ class HealthController(
     }
 
     private fun updateCircuit(row: NodeResult, cycle: Long): Long {
-        val transportHealthy =
-            row.telegram.ok && row.instagram.apiOk && row.web.okCount >= MIN_GENERIC_OK
+        // Quarantine only a truly dead transport. A node with working
+        // Telegram or generic HTTPS can still be a degraded fallback.
+        val hardFailure =
+            !row.telegram.ok &&
+                !row.instagram.apiOk &&
+                row.web.okCount == 0
 
-        if (transportHealthy) {
+        if (!hardFailure) {
             failureStreak.remove(row.tag)
             quarantineUntil.remove(row.tag)
             return 0L
@@ -394,22 +418,54 @@ class HealthController(
         if (row.quarantineUntil > System.currentTimeMillis()) return false
         val tg = row.telegram
         val ig = row.instagram
-        val speed = row.speedMbps
         return tg.ok &&
             tg.medianMs != null && tg.medianMs <= MAX_TG_MTPROTO_MS &&
             tg.abridgedOk > 0 && tg.intermediateOk > 0 &&
             ig.apiOk && ig.apiMs != null && ig.apiMs <= MAX_IG_API_MS &&
             row.web.okCount >= MIN_GENERIC_OK &&
-            row.web.medianMs != null &&
-            speed != null && speed >= MIN_SPEED_MBPS
+            row.web.medianMs != null
+    }
+
+    private fun fallbackEligible(row: NodeResult): Boolean {
+        if (row.quarantineUntil > System.currentTimeMillis()) return false
+        val tg = row.telegram
+        val telegramUsable =
+            tg.ok && tg.medianMs != null && tg.medianMs <= 1500.0
+        val secondaryConnectivity =
+            row.instagram.apiOk || row.web.okCount >= 1
+        return telegramUsable && secondaryConnectivity
     }
 
     private fun score(row: NodeResult): Double {
         val tg = row.telegram.medianMs ?: 10_000.0
         val ig = row.instagram.apiMs ?: 10_000.0
         val web = row.web.medianMs ?: 10_000.0
-        val speed = (row.speedMbps ?: 0.1).coerceAtLeast(0.1)
-        return 0.40 * tg + 0.20 * ig + 0.25 * web + 0.15 * (3000.0 / speed)
+        val speedPenalty = when {
+            row.speedMbps == null -> 800.0
+            row.speedMbps < MIN_SPEED_MBPS ->
+                (3000.0 / row.speedMbps.coerceAtLeast(0.1)) +
+                    (MIN_SPEED_MBPS - row.speedMbps) * 50.0
+            else -> 3000.0 / row.speedMbps
+        }
+        return 0.40 * tg +
+            0.20 * ig +
+            0.25 * web +
+            0.15 * speedPenalty
+    }
+
+    private fun fallbackScore(row: NodeResult): Double {
+        val tg = row.telegram.medianMs ?: 3000.0
+        val ig = row.instagram.apiMs ?: 2500.0
+        val web = row.web.medianMs ?: 2500.0
+        val missingWebPenalty =
+            (MIN_GENERIC_OK - row.web.okCount).coerceAtLeast(0) * 600.0
+        val speedPenalty =
+            row.speedMbps?.let { 3000.0 / it.coerceAtLeast(0.1) } ?: 800.0
+
+        return 0.50 * tg +
+            0.20 * ig +
+            0.20 * (web + missingWebPenalty) +
+            0.10 * speedPenalty
     }
 
     private fun loadTelegramDcs(): Map<Int, List<DcEndpoint>>? {

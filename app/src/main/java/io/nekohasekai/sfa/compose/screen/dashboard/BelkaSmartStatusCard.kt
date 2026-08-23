@@ -41,9 +41,10 @@ fun BelkaSmartStatusCard(
                     text = when {
                         !vpnEnabled -> "○ выключен"
                         vpnState.checking -> "🟡 проверка"
+                        vpnState.degraded && vpnState.selectedTag != null -> "🟠 деградация"
                         vpnState.noEligible -> "🔴 нет кандидата"
                         vpnState.selectedTag != null -> "🟢 активен"
-                        else -> "🟡 запуск"
+                        else -> "🟡 выбор сервера"
                     },
                     style = MaterialTheme.typography.labelLarge,
                 )

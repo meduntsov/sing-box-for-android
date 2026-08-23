@@ -81,10 +81,15 @@ fun DashboardScreen(
                     Text(
                         text = when {
                             serviceStatus != Status.Started -> "○ VPN отключён"
+                            belkaVpnState.checking && belkaVpnState.selectedTag != null ->
+                                "🟡 ${BelkaVpnState.countryLabel(belkaVpnState.selectedTag)} · проверка"
+                            belkaVpnState.degraded && belkaVpnState.selectedTag != null ->
+                                "🟠 ${BelkaVpnState.countryLabel(belkaVpnState.selectedTag)} · деградация"
+                            belkaVpnState.noEligible -> "🔴 Нет подходящего VPN"
                             belkaVpnState.selectedTag != null ->
                                 "🟢 ${BelkaVpnState.countryLabel(belkaVpnState.selectedTag)}"
                             belkaVpnState.checking -> "🟡 Проверка VPN…"
-                            else -> "🟡 VPN запускается…"
+                            else -> "🟡 VPN активен · выбор сервера"
                         },
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,

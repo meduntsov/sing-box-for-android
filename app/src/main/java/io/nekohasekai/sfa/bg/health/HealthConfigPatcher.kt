@@ -65,6 +65,17 @@ object HealthConfigPatcher {
         }
         if (leafTags.isEmpty()) return null
 
+        // BelkaVPN owns automatic server selection.
+        // Remove urltest/auto from the active proxy selector and use only
+        // concrete VLESS nodes discovered from the profile.
+        val concreteSelectorOutbounds = JSONArray()
+        leafTags.forEach { tag ->
+            concreteSelectorOutbounds.put(tag)
+            // Avoid 15-second stalls on dead routes.
+            outboundByTag[tag]?.put("connect_timeout", "5s")
+        }
+        selector.put("outbounds", concreteSelectorOutbounds)
+        selector.remove("default")
         selector.put("interrupt_exist_connections", true)
 
         val cleanInbounds = JSONArray()
@@ -149,7 +160,14 @@ object HealthConfigPatcher {
                 }
                 else -> false
             }
-            if (!isOldHealthRule) cleanRules.put(rule)
+            if (!isOldHealthRule) {
+                // Old profiles may explicitly route traffic through urltest[auto].
+                // Route that traffic through BelkaVPN's selector instead.
+                if (rule.optString("outbound") == "auto") {
+                    rule.put("outbound", SELECTOR_TAG)
+                }
+                cleanRules.put(rule)
+            }
         }
         route.put("rules", cleanRules)
 

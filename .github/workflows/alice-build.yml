@@ -104,7 +104,7 @@ jobs:
           text = path.read_text(encoding="utf-8")
           run_number = int(os.environ["GITHUB_RUN_NUMBER"])
           version_code = 100000 + run_number
-          version_name = f"2.2.{run_number}"
+          version_name = f"2.2.1.{run_number}"
 
           text, count_code = re.subn(
               r"(?m)^VERSION_CODE\s*=\s*\d+\s*$",

@@ -24,6 +24,7 @@ data class BelkaVpnUiState(
     val selectedTag: String? = null,
     val checking: Boolean = false,
     val noEligible: Boolean = false,
+    val degraded: Boolean = false,
     val nodes: Map<String, BelkaNodeStatus> = emptyMap(),
     val lastCheckAt: Long = 0L,
     val nextCheckAt: Long = 0L,
@@ -58,6 +59,21 @@ object BelkaVpnState {
                 selectedTag = tag,
                 checking = false,
                 noEligible = false,
+                degraded = false,
+                lastCheckAt = System.currentTimeMillis(),
+                nextCheckAt = nextCheckAt,
+                lastAction = action,
+            )
+        }
+    }
+
+    fun finishDegraded(tag: String, action: String, nextCheckAt: Long) {
+        _state.update {
+            it.copy(
+                selectedTag = tag,
+                checking = false,
+                noEligible = false,
+                degraded = true,
                 lastCheckAt = System.currentTimeMillis(),
                 nextCheckAt = nextCheckAt,
                 lastAction = action,
@@ -71,6 +87,7 @@ object BelkaVpnState {
                 selectedTag = currentTag ?: it.selectedTag,
                 checking = false,
                 noEligible = true,
+                degraded = false,
                 lastCheckAt = System.currentTimeMillis(),
                 nextCheckAt = nextCheckAt,
                 lastAction = "Нет подходящего сервера",
